@@ -44,6 +44,7 @@ class TrainConfig:
     data_dir: str
     train_file: str
     valid_file: str
+    test_file: str
     src_key: str
     tgt_key: str
     model_name_or_path: str
@@ -59,6 +60,7 @@ class TrainConfig:
     gen_max_new_tokens: int
     eval_beam: bool
     beam_size: int
+    eval_test: bool
     fp16: bool
     seed: int
     save_dir: str
@@ -188,6 +190,7 @@ def main() -> None:
     parser.add_argument("--data_dir", type=str, default="data/AP0004_Midterm&Final_translation_dataset_zh_en")
     parser.add_argument("--train_file", type=str, default="train_10k.jsonl")
     parser.add_argument("--valid_file", type=str, default="valid.jsonl")
+    parser.add_argument("--test_file", type=str, default="test.jsonl")
     parser.add_argument("--src_key", type=str, default="zh")
     parser.add_argument("--tgt_key", type=str, default="en")
     parser.add_argument("--model_name_or_path", type=str, default="t5-small")
@@ -203,6 +206,7 @@ def main() -> None:
     parser.add_argument("--gen_max_new_tokens", type=int, default=120)
     parser.add_argument("--eval_beam", action="store_true")
     parser.add_argument("--beam_size", type=int, default=4)
+    parser.add_argument("--eval_test", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--fp16", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--save_dir", type=str, default="checkpoints/finetune")
@@ -212,6 +216,7 @@ def main() -> None:
         data_dir=args.data_dir,
         train_file=args.train_file,
         valid_file=args.valid_file,
+        test_file=args.test_file,
         src_key=args.src_key,
         tgt_key=args.tgt_key,
         model_name_or_path=args.model_name_or_path,
@@ -227,6 +232,7 @@ def main() -> None:
         gen_max_new_tokens=args.gen_max_new_tokens,
         eval_beam=bool(args.eval_beam),
         beam_size=args.beam_size,
+        eval_test=bool(args.eval_test),
         fp16=bool(args.fp16),
         seed=args.seed,
         save_dir=args.save_dir,
@@ -241,9 +247,11 @@ def main() -> None:
     data_dir = Path(cfg.data_dir)
     train_path = data_dir / cfg.train_file
     valid_path = data_dir / cfg.valid_file
+    test_path = data_dir / cfg.test_file
 
     train_ds = JsonlSeq2SeqTextDataset(train_path, src_key=cfg.src_key, tgt_key=cfg.tgt_key)
     valid_ds = JsonlSeq2SeqTextDataset(valid_path, src_key=cfg.src_key, tgt_key=cfg.tgt_key)
+    test_ds = JsonlSeq2SeqTextDataset(test_path, src_key=cfg.src_key, tgt_key=cfg.tgt_key) if cfg.eval_test else None
 
     tokenizer = AutoTokenizer.from_pretrained(cfg.model_name_or_path, use_fast=True)
     model = AutoModelForSeq2SeqLM.from_pretrained(cfg.model_name_or_path)
@@ -254,6 +262,11 @@ def main() -> None:
     collate = make_collate_fn(tokenizer, cfg)
     train_loader = DataLoader(train_ds, batch_size=cfg.batch_size, shuffle=True, collate_fn=collate)
     valid_loader = DataLoader(valid_ds, batch_size=cfg.batch_size, shuffle=False, collate_fn=collate)
+    test_loader = (
+        DataLoader(test_ds, batch_size=cfg.batch_size, shuffle=False, collate_fn=collate)
+        if test_ds is not None
+        else None
+    )
 
     optim = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     scaler = torch.cuda.amp.GradScaler(enabled=bool(cfg.fp16 and device.type == "cuda"))
@@ -262,7 +275,9 @@ def main() -> None:
     save_dir.mkdir(parents=True, exist_ok=True)
     save_json(save_dir / "config.json", asdict(cfg))
 
-    best_valid_loss = float("inf")
+    best_valid_bleu = float("-inf")
+    best_epoch = 0
+    best_snapshot: Dict[str, float | int] = {}
 
     for epoch in range(1, cfg.epochs + 1):
         model.train()
@@ -291,6 +306,20 @@ def main() -> None:
 
         train_loss = total_loss / max(1, steps)
         valid_loss, valid_bleu = evaluate(model, tokenizer, valid_loader, device, cfg)
+        test_loss = 0.0
+        test_bleu = 0.0
+        if test_loader is not None:
+            test_loss, test_bleu = evaluate(model, tokenizer, test_loader, device, cfg)
+
+        is_best = valid_bleu > best_valid_bleu
+        if is_best:
+            best_valid_bleu = valid_bleu
+            best_epoch = epoch
+            best_snapshot = {
+                "epoch": epoch,
+                "valid_bleu": float(valid_bleu),
+                "test_bleu": float(test_bleu),
+            }
 
         elapsed = time.time() - t0
         print(
@@ -300,6 +329,10 @@ def main() -> None:
                     "train_loss": round(train_loss, 4),
                     "valid_loss": round(valid_loss, 4),
                     "valid_bleu": round(valid_bleu, 2),
+                    "test_loss": round(test_loss, 4) if cfg.eval_test else None,
+                    "test_bleu": round(test_bleu, 2) if cfg.eval_test else None,
+                    "best_epoch": best_epoch,
+                    "best_valid_bleu": round(best_valid_bleu, 2),
                     "seconds": round(elapsed, 1),
                     "device": str(device),
                     "model": cfg.model_name_or_path,
@@ -316,11 +349,10 @@ def main() -> None:
             "tokenizer_name_or_path": cfg.model_name_or_path,
         }
         torch.save(ckpt, save_dir / "last.pt")
-        if valid_loss < best_valid_loss:
-            best_valid_loss = valid_loss
+        if is_best:
             torch.save(ckpt, save_dir / "best.pt")
+            save_json(save_dir / "best.json", {"best": best_snapshot})
 
 
 if __name__ == "__main__":
     main()
-

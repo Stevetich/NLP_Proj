@@ -31,6 +31,7 @@ class TrainConfig:
     data_dir: str
     train_file: str
     valid_file: str
+    test_file: str
     src_key: str
     tgt_key: str
     dim: int
@@ -53,6 +54,7 @@ class TrainConfig:
     eval_samples: int
     beam_size: int
     eval_beam: bool
+    eval_test: bool
     seed: int
     save_dir: str
 
@@ -138,6 +140,7 @@ def main() -> None:
     parser.add_argument("--data_dir", type=str, default="data/AP0004_Midterm&Final_translation_dataset_zh_en")
     parser.add_argument("--train_file", type=str, default="train_10k.jsonl")
     parser.add_argument("--valid_file", type=str, default="valid.jsonl")
+    parser.add_argument("--test_file", type=str, default="test.jsonl")
     parser.add_argument("--src_key", type=str, default="zh")
     parser.add_argument("--tgt_key", type=str, default="en")
     parser.add_argument("--dim", type=int, default=512)
@@ -160,6 +163,7 @@ def main() -> None:
     parser.add_argument("--eval_samples", type=int, default=500)
     parser.add_argument("--beam_size", type=int, default=4)
     parser.add_argument("--eval_beam", action="store_true")
+    parser.add_argument("--eval_test", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--save_dir", type=str, default="checkpoints/transformer")
     args = parser.parse_args()
@@ -168,6 +172,7 @@ def main() -> None:
         data_dir=args.data_dir,
         train_file=args.train_file,
         valid_file=args.valid_file,
+        test_file=args.test_file,
         src_key=args.src_key,
         tgt_key=args.tgt_key,
         dim=args.dim,
@@ -190,6 +195,7 @@ def main() -> None:
         eval_samples=args.eval_samples,
         beam_size=args.beam_size,
         eval_beam=bool(args.eval_beam),
+        eval_test=bool(args.eval_test),
         seed=args.seed,
         save_dir=args.save_dir,
     )
@@ -199,6 +205,7 @@ def main() -> None:
     data_dir = Path(cfg.data_dir)
     train_path = data_dir / cfg.train_file
     valid_path = data_dir / cfg.valid_file
+    test_path = data_dir / cfg.test_file
 
     src_tokenize = tokenize_zh if cfg.src_key == "zh" else lambda s: tokenize_en(s, lowercase=True)
     tgt_tokenize = tokenize_en if cfg.tgt_key == "en" else tokenize_zh
@@ -216,6 +223,17 @@ def main() -> None:
         tgt_key=cfg.tgt_key,
         src_tokenize=src_tokenize,
         tgt_tokenize=tgt_tokenize,
+    )
+    test_ds = (
+        JsonlTranslationDataset(
+            jsonl_path=test_path,
+            src_key=cfg.src_key,
+            tgt_key=cfg.tgt_key,
+            src_tokenize=src_tokenize,
+            tgt_tokenize=tgt_tokenize,
+        )
+        if cfg.eval_test
+        else None
     )
 
     src_vocab = build_vocab(
@@ -237,6 +255,11 @@ def main() -> None:
     )
     train_loader = DataLoader(train_ds, batch_size=cfg.batch_size, shuffle=True, collate_fn=collate)
     valid_loader = DataLoader(valid_ds, batch_size=cfg.batch_size, shuffle=False, collate_fn=collate)
+    test_loader = (
+        DataLoader(test_ds, batch_size=cfg.batch_size, shuffle=False, collate_fn=collate)
+        if test_ds is not None
+        else None
+    )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = Seq2SeqTransformer(
@@ -264,7 +287,9 @@ def main() -> None:
     save_vocab(save_dir / "src_vocab.json", src_vocab)
     save_vocab(save_dir / "tgt_vocab.json", tgt_vocab)
 
-    best_valid_loss = float("inf")
+    best_valid_metric = float("-inf")
+    best_epoch = 0
+    best_snapshot: Dict[str, float | int] = {}
 
     for epoch in range(1, cfg.epochs + 1):
         model.train()
@@ -314,6 +339,31 @@ def main() -> None:
             beam_size=cfg.beam_size,
             do_beam=cfg.eval_beam,
         )
+        test_greedy_bleu = 0.0
+        test_beam_bleu = 0.0
+        if test_loader is not None:
+            test_greedy_bleu, test_beam_bleu = evaluate_bleu(
+                model=model,
+                loader=test_loader,
+                tgt_vocab=tgt_vocab,
+                device=device,
+                max_len=cfg.eval_max_len,
+                max_samples=cfg.eval_samples,
+                beam_size=cfg.beam_size,
+                do_beam=cfg.eval_beam,
+            )
+
+        valid_metric = beam_bleu if cfg.eval_beam else greedy_bleu
+        test_metric = test_beam_bleu if cfg.eval_beam else test_greedy_bleu
+        is_best = valid_metric > best_valid_metric
+        if is_best:
+            best_valid_metric = valid_metric
+            best_epoch = epoch
+            best_snapshot = {
+                "epoch": epoch,
+                "valid_metric": float(valid_metric),
+                "test_metric": float(test_metric),
+            }
 
         elapsed = time.time() - t0
         print(
@@ -322,8 +372,12 @@ def main() -> None:
                     "epoch": epoch,
                     "train_loss": round(train_loss, 4),
                     "valid_loss": round(valid_loss, 4),
-                    "greedy_bleu": round(greedy_bleu, 2),
-                    "beam_bleu": round(beam_bleu, 2),
+                    "valid_greedy_bleu": round(greedy_bleu, 2),
+                    "valid_beam_bleu": round(beam_bleu, 2),
+                    "test_greedy_bleu": round(test_greedy_bleu, 2) if cfg.eval_test else None,
+                    "test_beam_bleu": round(test_beam_bleu, 2) if cfg.eval_test else None,
+                    "best_epoch": best_epoch,
+                    "best_valid_metric": round(best_valid_metric, 2),
                     "seconds": round(elapsed, 1),
                     "device": str(device),
                     "norm_type": cfg.norm_type,
@@ -340,9 +394,9 @@ def main() -> None:
             "tgt_vocab": {"itos": tgt_vocab.itos},
         }
         torch.save(ckpt, save_dir / "last.pt")
-        if valid_loss < best_valid_loss:
-            best_valid_loss = valid_loss
+        if is_best:
             torch.save(ckpt, save_dir / "best.pt")
+            save_json(save_dir / "best.json", {"best": best_snapshot})
 
 
 if __name__ == "__main__":
