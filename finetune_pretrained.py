@@ -56,7 +56,9 @@ class TrainConfig:
     weight_decay: float
     grad_clip: float
     epochs: int
+    max_train_steps: int
     eval_samples: int
+    max_eval_batches: int
     gen_max_new_tokens: int
     eval_beam: bool
     beam_size: int
@@ -75,6 +77,13 @@ def set_seed(seed: int) -> None:
 def save_json(path: Path, obj: Dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def clip_grad_norm(parameters, max_norm: float) -> None:
+    try:
+        torch.nn.utils.clip_grad_norm_(parameters, max_norm, foreach=False)
+    except TypeError:
+        torch.nn.utils.clip_grad_norm_(parameters, max_norm)
 
 
 def _tokenize_targets(tokenizer, texts: List[str], max_len: int):
@@ -153,7 +162,10 @@ def evaluate(
     hyps: List[List[str]] = []
 
     seen = 0
+    batches = 0
     for batch in loader:
+        if cfg.max_eval_batches > 0 and batches >= cfg.max_eval_batches:
+            break
         if cfg.eval_samples > 0 and seen >= cfg.eval_samples:
             break
         batch = batch_to_device(batch, device)
@@ -164,6 +176,7 @@ def evaluate(
         )
         total_loss += float(outputs.loss.item())
         total_batches += 1
+        batches += 1
 
         num_beams = cfg.beam_size if cfg.eval_beam else 1
         gen_ids = model.generate(
@@ -202,7 +215,9 @@ def main() -> None:
     parser.add_argument("--weight_decay", type=float, default=0.01)
     parser.add_argument("--grad_clip", type=float, default=1.0)
     parser.add_argument("--epochs", type=int, default=3)
+    parser.add_argument("--max_train_steps", type=int, default=0)
     parser.add_argument("--eval_samples", type=int, default=500)
+    parser.add_argument("--max_eval_batches", type=int, default=0)
     parser.add_argument("--gen_max_new_tokens", type=int, default=120)
     parser.add_argument("--eval_beam", action="store_true")
     parser.add_argument("--beam_size", type=int, default=4)
@@ -228,7 +243,9 @@ def main() -> None:
         weight_decay=args.weight_decay,
         grad_clip=args.grad_clip,
         epochs=args.epochs,
+        max_train_steps=args.max_train_steps,
         eval_samples=args.eval_samples,
+        max_eval_batches=args.max_eval_batches,
         gen_max_new_tokens=args.gen_max_new_tokens,
         eval_beam=bool(args.eval_beam),
         beam_size=args.beam_size,
@@ -286,6 +303,8 @@ def main() -> None:
         steps = 0
 
         for batch in train_loader:
+            if cfg.max_train_steps > 0 and steps >= cfg.max_train_steps:
+                break
             batch = batch_to_device(batch, device)
             optim.zero_grad(set_to_none=True)
             with torch.cuda.amp.autocast(enabled=bool(cfg.fp16 and device.type == "cuda")):
@@ -297,7 +316,7 @@ def main() -> None:
                 loss = outputs.loss
             scaler.scale(loss).backward()
             scaler.unscale_(optim)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
+            clip_grad_norm(model.parameters(), cfg.grad_clip)
             scaler.step(optim)
             scaler.update()
 
