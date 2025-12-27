@@ -42,10 +42,14 @@ def corpus_bleu(
 
     bp = min(1.0, hyp_len_total / ref_len_total) if hyp_len_total > 0 else 0.0
 
-    bleu = bp
+    prod_p = 1.0
     for n in range(max_n):
         if total_counts[n] <= 0:
             return 0.0
-        bleu *= clipped_counts[n] / total_counts[n]
+        p_n = clipped_counts[n] / total_counts[n]
+        if p_n <= 0.0:
+            return 0.0
+        prod_p *= p_n
 
+    bleu = bp * (prod_p ** (1.0 / max_n))
     return 100.0 * bleu
