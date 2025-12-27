@@ -1,0 +1,29 @@
+# 数据集与大文件
+data/
+tmp/
+checkpoints/
+
+# 常见二进制与压缩
+*.zip
+*.rar
+*.edf
+*.bdf
+*.gdf
+*.rec
+*.mat
+*.xlsx
+
+*.sh
+
+# Python/Notebook 临时文件
+__pycache__/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
+
+# 虚拟环境
+venv/
+.venv/
+
+# 其它
+.DS_Store

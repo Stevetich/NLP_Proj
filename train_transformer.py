@@ -21,9 +21,9 @@ from nmt_rnn.data import (
     tokenize_en,
     tokenize_zh,
 )
-from nmt_rnn.decoding import beam_search_decode, greedy_decode
 from nmt_rnn.metrics import corpus_bleu
-from nmt_rnn.model import AttentionType, RnnType, Seq2Seq
+from nmt_transformer.decoding import beam_search_decode, greedy_decode
+from nmt_transformer.model import NormType, PosEncodingType, Seq2SeqTransformer
 
 
 @dataclass
@@ -33,12 +33,14 @@ class TrainConfig:
     valid_file: str
     src_key: str
     tgt_key: str
-    rnn_type: RnnType
-    attention_type: AttentionType
-    embed_size: int
-    hidden_size: int
+    dim: int
     num_layers: int
+    num_heads: int
+    ff_dim: int
     dropout: float
+    attn_dropout: float
+    norm_type: NormType
+    pos_encoding: PosEncodingType
     batch_size: int
     max_src_len: int
     max_tgt_len: int
@@ -47,7 +49,6 @@ class TrainConfig:
     lr: float
     grad_clip: float
     epochs: int
-    teacher_forcing_ratio: float
     eval_max_len: int
     eval_samples: int
     beam_size: int
@@ -70,34 +71,15 @@ def save_vocab(path: Path, vocab: Vocab) -> None:
     save_json(path, {"itos": vocab.itos})
 
 
-def load_vocab(path: Path) -> Vocab:
-    obj = json.loads(path.read_text(encoding="utf-8"))
-    itos = obj["itos"]
-    stoi = {w: i for i, w in enumerate(itos)}
-    return Vocab(
-        stoi=stoi,
-        itos=itos,
-        pad_id=stoi["<pad>"],
-        unk_id=stoi["<unk>"],
-        bos_id=stoi["<bos>"],
-        eos_id=stoi["<eos>"],
-    )
-
-
-def compute_loss(
-    logits: torch.Tensor, tgt_ids: torch.Tensor, pad_id: int, criterion: nn.Module
-) -> torch.Tensor:
+def compute_loss(logits: torch.Tensor, tgt_ids: torch.Tensor, criterion: nn.Module) -> torch.Tensor:
     gold = tgt_ids[:, 1:].contiguous()
-    logits = logits.contiguous()
-    loss = criterion(logits.view(-1, logits.size(-1)), gold.view(-1))
-    return loss
+    return criterion(logits.reshape(-1, logits.size(-1)), gold.reshape(-1))
 
 
 @torch.no_grad()
 def evaluate_bleu(
-    model: Seq2Seq,
+    model: Seq2SeqTransformer,
     loader: DataLoader,
-    src_vocab: Vocab,
     tgt_vocab: Vocab,
     device: torch.device,
     max_len: int,
@@ -115,15 +97,16 @@ def evaluate_bleu(
         if max_samples > 0 and seen >= max_samples:
             break
         batch = batch_to_device(batch, device)
-        src_ids, src_lens, tgt_ids = batch["src_ids"], batch["src_lens"], batch["tgt_ids"]
+        src_ids, tgt_ids = batch["src_ids"], batch["tgt_ids"]
+
         greedy_ids = greedy_decode(
             model=model,
             src_ids=src_ids,
-            src_lens=src_lens,
             bos_id=tgt_vocab.bos_id,
             eos_id=tgt_vocab.eos_id,
             max_len=max_len,
         )
+
         for i, (hyp_ids, ref_ids) in enumerate(zip(greedy_ids, tgt_ids.tolist())):
             if max_samples > 0 and seen >= max_samples:
                 break
@@ -133,11 +116,9 @@ def evaluate_bleu(
             refs.append(ref_tokens)
             if do_beam:
                 one_src = src_ids[i : i + 1]
-                one_len = src_lens[i : i + 1]
                 beam = beam_search_decode(
                     model=model,
                     src_ids=one_src,
-                    src_lens=one_len,
                     bos_id=tgt_vocab.bos_id,
                     eos_id=tgt_vocab.eos_id,
                     beam_size=beam_size,
@@ -159,27 +140,28 @@ def main() -> None:
     parser.add_argument("--valid_file", type=str, default="valid.jsonl")
     parser.add_argument("--src_key", type=str, default="zh")
     parser.add_argument("--tgt_key", type=str, default="en")
-    parser.add_argument("--rnn_type", type=str, choices=["gru", "lstm"], default="gru")
-    parser.add_argument("--attention_type", type=str, choices=["dot", "general", "additive"], default="additive")
-    parser.add_argument("--embed_size", type=int, default=256)
-    parser.add_argument("--hidden_size", type=int, default=512)
-    parser.add_argument("--num_layers", type=int, default=2)
-    parser.add_argument("--dropout", type=float, default=0.2)
+    parser.add_argument("--dim", type=int, default=512)
+    parser.add_argument("--num_layers", type=int, default=6)
+    parser.add_argument("--num_heads", type=int, default=8)
+    parser.add_argument("--ff_dim", type=int, default=2048)
+    parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument("--attn_dropout", type=float, default=0.1)
+    parser.add_argument("--norm_type", type=str, choices=["layernorm", "rmsnorm"], default="layernorm")
+    parser.add_argument("--pos_encoding", type=str, choices=["sinusoidal", "learned", "relative"], default="sinusoidal")
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--max_src_len", type=int, default=200)
     parser.add_argument("--max_tgt_len", type=int, default=200)
     parser.add_argument("--max_vocab", type=int, default=50000)
     parser.add_argument("--min_freq", type=int, default=2)
-    parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--lr", type=float, default=5e-4)
     parser.add_argument("--grad_clip", type=float, default=1.0)
     parser.add_argument("--epochs", type=int, default=10)
-    parser.add_argument("--teacher_forcing_ratio", type=float, default=1.0)
     parser.add_argument("--eval_max_len", type=int, default=120)
     parser.add_argument("--eval_samples", type=int, default=500)
     parser.add_argument("--beam_size", type=int, default=4)
     parser.add_argument("--eval_beam", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--save_dir", type=str, default="checkpoints/rnn")
+    parser.add_argument("--save_dir", type=str, default="checkpoints/transformer")
     args = parser.parse_args()
 
     cfg = TrainConfig(
@@ -188,12 +170,14 @@ def main() -> None:
         valid_file=args.valid_file,
         src_key=args.src_key,
         tgt_key=args.tgt_key,
-        rnn_type=args.rnn_type,
-        attention_type=args.attention_type,
-        embed_size=args.embed_size,
-        hidden_size=args.hidden_size,
+        dim=args.dim,
         num_layers=args.num_layers,
+        num_heads=args.num_heads,
+        ff_dim=args.ff_dim,
         dropout=args.dropout,
+        attn_dropout=args.attn_dropout,
+        norm_type=args.norm_type,
+        pos_encoding=args.pos_encoding,
         batch_size=args.batch_size,
         max_src_len=args.max_src_len,
         max_tgt_len=args.max_tgt_len,
@@ -202,7 +186,6 @@ def main() -> None:
         lr=args.lr,
         grad_clip=args.grad_clip,
         epochs=args.epochs,
-        teacher_forcing_ratio=args.teacher_forcing_ratio,
         eval_max_len=args.eval_max_len,
         eval_samples=args.eval_samples,
         beam_size=args.beam_size,
@@ -256,21 +239,24 @@ def main() -> None:
     valid_loader = DataLoader(valid_ds, batch_size=cfg.batch_size, shuffle=False, collate_fn=collate)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = Seq2Seq(
+    model = Seq2SeqTransformer(
         src_vocab_size=len(src_vocab),
         tgt_vocab_size=len(tgt_vocab),
-        embed_size=cfg.embed_size,
-        hidden_size=cfg.hidden_size,
-        num_layers=cfg.num_layers,
-        dropout=cfg.dropout,
-        rnn_type=cfg.rnn_type,
-        attention_type=cfg.attention_type,
         src_pad_id=src_vocab.pad_id,
         tgt_pad_id=tgt_vocab.pad_id,
+        dim=cfg.dim,
+        num_layers=cfg.num_layers,
+        num_heads=cfg.num_heads,
+        ff_dim=cfg.ff_dim,
+        dropout=cfg.dropout,
+        attn_dropout=cfg.attn_dropout,
+        norm_type=cfg.norm_type,
+        pos_encoding=cfg.pos_encoding,
+        max_len=max(cfg.max_src_len, cfg.max_tgt_len, cfg.eval_max_len) + 8,
     ).to(device)
 
     criterion = nn.CrossEntropyLoss(ignore_index=tgt_vocab.pad_id)
-    optim = torch.optim.Adam(model.parameters(), lr=cfg.lr)
+    optim = torch.optim.AdamW(model.parameters(), lr=cfg.lr)
 
     save_dir = Path(cfg.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -289,13 +275,8 @@ def main() -> None:
         for batch in train_loader:
             batch = batch_to_device(batch, device)
             optim.zero_grad(set_to_none=True)
-            out = model(
-                src_ids=batch["src_ids"],
-                src_lens=batch["src_lens"],
-                tgt_ids=batch["tgt_ids"],
-                teacher_forcing_ratio=cfg.teacher_forcing_ratio,
-            )
-            loss = compute_loss(out.logits, batch["tgt_ids"], tgt_vocab.pad_id, criterion)
+            out = model(src_ids=batch["src_ids"], tgt_ids=batch["tgt_ids"])
+            loss = compute_loss(out.logits, batch["tgt_ids"], criterion)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
             optim.step()
@@ -314,13 +295,8 @@ def main() -> None:
         with torch.no_grad():
             for batch in valid_loader:
                 batch = batch_to_device(batch, device)
-                out = model(
-                    src_ids=batch["src_ids"],
-                    src_lens=batch["src_lens"],
-                    tgt_ids=batch["tgt_ids"],
-                    teacher_forcing_ratio=1.0,
-                )
-                loss = compute_loss(out.logits, batch["tgt_ids"], tgt_vocab.pad_id, criterion)
+                out = model(src_ids=batch["src_ids"], tgt_ids=batch["tgt_ids"])
+                loss = compute_loss(out.logits, batch["tgt_ids"], criterion)
                 gold = batch["tgt_ids"][:, 1:]
                 non_pad = gold.ne(tgt_vocab.pad_id).sum().item()
                 valid_total_tokens += int(non_pad)
@@ -331,7 +307,6 @@ def main() -> None:
         greedy_bleu, beam_bleu = evaluate_bleu(
             model=model,
             loader=valid_loader,
-            src_vocab=src_vocab,
             tgt_vocab=tgt_vocab,
             device=device,
             max_len=cfg.eval_max_len,
@@ -351,9 +326,8 @@ def main() -> None:
                     "beam_bleu": round(beam_bleu, 2),
                     "seconds": round(elapsed, 1),
                     "device": str(device),
-                    "teacher_forcing_ratio": cfg.teacher_forcing_ratio,
-                    "rnn_type": cfg.rnn_type,
-                    "attention_type": cfg.attention_type,
+                    "norm_type": cfg.norm_type,
+                    "pos_encoding": cfg.pos_encoding,
                 },
                 ensure_ascii=False,
             )
