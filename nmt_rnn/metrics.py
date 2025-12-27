@@ -51,5 +51,5 @@ def corpus_bleu(
             return 0.0
         prod_p *= p_n
 
-    bleu = bp * (prod_p ** (1.0 / max_n))
+    bleu = bp * prod_p
     return 100.0 * bleu
