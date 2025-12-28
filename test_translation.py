@@ -90,6 +90,7 @@ def _load_checkpoint(path: Path, arch: Arch, device: torch.device):
             norm_type=str(cfg["norm_type"]),
             pos_encoding=str(cfg["pos_encoding"]),
             max_len=max_len,
+            tie_embeddings=bool(cfg.get("tie_embeddings", True)),
         )
 
     state = ckpt.get("model")
@@ -203,6 +204,7 @@ def main() -> None:
     parser.add_argument("--max_len", type=int, default=None)
     parser.add_argument("--beam_size", type=int, default=1)
     parser.add_argument("--n_best", type=int, default=1)
+    parser.add_argument("--benchmark", type=int, default=0, help="Benchmark N repeats per line")
     args = parser.parse_args()
 
     if args.device == "cpu":
@@ -220,29 +222,55 @@ def main() -> None:
     max_len = int(args.max_len) if args.max_len is not None else int(cfg.get("eval_max_len", 120))
     beam_size = max(1, int(args.beam_size))
     n_best = max(1, int(args.n_best))
+    bench_n = max(0, int(args.benchmark))
 
     for line in _iter_lines(args.text, args.input):
         if not line.strip():
             print("")
             continue
-        texts, scores = _translate_one(
-            model=model,
-            arch=arch,
-            src_vocab=src_vocab,
-            tgt_vocab=tgt_vocab,
-            cfg=cfg,
-            text=line,
-            device=device,
-            max_len=max_len,
-            beam_size=beam_size,
-            n_best=n_best,
-        )
+        if bench_n > 0:
+            import time
+
+            torch.cuda.synchronize() if device.type == "cuda" else None
+            t0 = time.time()
+            for _ in range(bench_n):
+                texts, scores = _translate_one(
+                    model=model,
+                    arch=arch,
+                    src_vocab=src_vocab,
+                    tgt_vocab=tgt_vocab,
+                    cfg=cfg,
+                    text=line,
+                    device=device,
+                    max_len=max_len,
+                    beam_size=beam_size,
+                    n_best=n_best,
+                )
+            torch.cuda.synchronize() if device.type == "cuda" else None
+            dt = time.time() - t0
+            ms = 1000.0 * dt / float(bench_n)
+        else:
+            ms = None
+            texts, scores = _translate_one(
+                model=model,
+                arch=arch,
+                src_vocab=src_vocab,
+                tgt_vocab=tgt_vocab,
+                cfg=cfg,
+                text=line,
+                device=device,
+                max_len=max_len,
+                beam_size=beam_size,
+                n_best=n_best,
+            )
         if n_best == 1:
             print(texts[0])
         else:
-            print(json.dumps({"input": line, "hyps": texts, "scores": scores}, ensure_ascii=False))
+            out = {"input": line, "hyps": texts, "scores": scores}
+            if ms is not None:
+                out["avg_ms_per_sent"] = round(ms, 2)
+            print(json.dumps(out, ensure_ascii=False))
 
 
 if __name__ == "__main__":
     main()
-

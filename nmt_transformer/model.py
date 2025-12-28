@@ -361,6 +361,7 @@ class TransformerDecoder(nn.Module):
         max_len: int,
         rel_num_buckets: int,
         rel_max_distance: int,
+        tie_embeddings: bool,
     ) -> None:
         super().__init__()
         self.pad_id = pad_id
@@ -409,7 +410,8 @@ class TransformerDecoder(nn.Module):
         )
         self.final_norm = make_norm(norm_type, dim, norm_eps)
         self.lm_head = nn.Linear(dim, vocab_size, bias=False)
-        self.lm_head.weight = self.embed.weight
+        if tie_embeddings:
+            self.lm_head.weight = self.embed.weight
 
     def _causal_mask(self, tgt_len: int, device: torch.device) -> torch.Tensor:
         return torch.triu(torch.ones(tgt_len, tgt_len, device=device, dtype=torch.bool), diagonal=1)[
@@ -476,6 +478,7 @@ class Seq2SeqTransformer(nn.Module):
         max_len: int = 4096,
         rel_num_buckets: int = 32,
         rel_max_distance: int = 128,
+        tie_embeddings: bool = True,
     ) -> None:
         super().__init__()
         self.encoder = TransformerEncoder(
@@ -509,6 +512,7 @@ class Seq2SeqTransformer(nn.Module):
             max_len=max_len,
             rel_num_buckets=rel_num_buckets,
             rel_max_distance=rel_max_distance,
+            tie_embeddings=tie_embeddings,
         )
 
     def forward(self, src_ids: torch.Tensor, tgt_ids: torch.Tensor) -> Seq2SeqTransformerOutput:

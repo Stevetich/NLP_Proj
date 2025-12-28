@@ -55,6 +55,7 @@ class TrainConfig:
     warmup_steps: int
     weight_decay: float
     label_smoothing: float
+    tie_embeddings: bool
     grad_clip: float
     epochs: int
     eval_max_len: int
@@ -183,6 +184,7 @@ def main() -> None:
     parser.add_argument("--warmup_steps", type=int, default=2000)
     parser.add_argument("--weight_decay", type=float, default=0.0)
     parser.add_argument("--label_smoothing", type=float, default=0.1)
+    parser.add_argument("--tie_embeddings", type=int, choices=[0, 1], default=1)
     parser.add_argument("--grad_clip", type=float, default=1.0)
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--eval_max_len", type=int, default=120)
@@ -219,6 +221,7 @@ def main() -> None:
         warmup_steps=args.warmup_steps,
         weight_decay=args.weight_decay,
         label_smoothing=args.label_smoothing,
+        tie_embeddings=bool(args.tie_embeddings),
         grad_clip=args.grad_clip,
         epochs=args.epochs,
         eval_max_len=args.eval_max_len,
@@ -306,7 +309,9 @@ def main() -> None:
         norm_type=cfg.norm_type,
         pos_encoding=cfg.pos_encoding,
         max_len=max(cfg.max_src_len, cfg.max_tgt_len, cfg.eval_max_len) + 8,
+        tie_embeddings=cfg.tie_embeddings,
     ).to(device)
+    num_params = int(sum(p.numel() for p in model.parameters()))
 
     optim = torch.optim.AdamW(
         model.parameters(),
@@ -329,9 +334,11 @@ def main() -> None:
 
     for epoch in range(1, cfg.epochs + 1):
         model.train()
-        t0 = time.time()
+        t0_epoch = time.time()
+        t0_train = time.time()
         total_loss = 0.0
         total_tokens = 0
+        lr_now = float(optim.param_groups[0]["lr"])
 
         for batch in train_loader:
             batch = batch_to_device(batch, device)
@@ -342,6 +349,7 @@ def main() -> None:
                 lr = (float(cfg.lr) * (cfg.dim**-0.5)) * min(step**-0.5, step * (warmup**-1.5))
                 for group in optim.param_groups:
                     group["lr"] = lr
+                lr_now = float(lr)
             optim.zero_grad(set_to_none=True)
             out = model(src_ids=batch["src_ids"], tgt_ids=batch["tgt_ids"])
             loss = compute_loss(
@@ -361,8 +369,10 @@ def main() -> None:
                 total_loss += float(loss.item()) * max(1, int(non_pad))
 
         train_loss = total_loss / max(1, total_tokens)
+        train_seconds = time.time() - t0_train
 
         model.eval()
+        t0_eval = time.time()
         valid_total_loss = 0.0
         valid_total_tokens = 0
         with torch.no_grad():
@@ -407,6 +417,7 @@ def main() -> None:
                 do_beam=cfg.eval_beam,
                 tgt_key=cfg.tgt_key,
             )
+        eval_seconds = time.time() - t0_eval
 
         valid_metric = beam_bleu if cfg.eval_beam else greedy_bleu
         test_metric = test_beam_bleu if cfg.eval_beam else test_greedy_bleu
@@ -420,7 +431,7 @@ def main() -> None:
                 "test_metric": float(test_metric),
             }
 
-        elapsed = time.time() - t0
+        elapsed = time.time() - t0_epoch
         print(
             json.dumps(
                 {
@@ -434,9 +445,19 @@ def main() -> None:
                     "best_epoch": best_epoch,
                     "best_valid_metric": round(best_valid_metric, 2),
                     "seconds": round(elapsed, 1),
+                    "train_seconds": round(train_seconds, 1),
+                    "eval_seconds": round(eval_seconds, 1),
+                    "train_tokens_per_sec": round(float(total_tokens) / max(1e-9, float(train_seconds)), 1),
+                    "num_params": num_params,
                     "device": str(device),
                     "norm_type": cfg.norm_type,
                     "pos_encoding": cfg.pos_encoding,
+                    "lr": lr_now,
+                    "scheduler": cfg.scheduler,
+                    "warmup_steps": cfg.warmup_steps,
+                    "weight_decay": cfg.weight_decay,
+                    "label_smoothing": cfg.label_smoothing,
+                    "tie_embeddings": cfg.tie_embeddings,
                 },
                 ensure_ascii=False,
             )

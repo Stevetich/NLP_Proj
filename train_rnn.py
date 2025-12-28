@@ -295,6 +295,7 @@ def main() -> None:
         src_pad_id=src_vocab.pad_id,
         tgt_pad_id=tgt_vocab.pad_id,
     ).to(device)
+    num_params = int(sum(p.numel() for p in model.parameters()))
 
     criterion = nn.CrossEntropyLoss(ignore_index=tgt_vocab.pad_id)
     optim = torch.optim.Adam(model.parameters(), lr=cfg.lr)
@@ -311,7 +312,8 @@ def main() -> None:
 
     for epoch in range(1, cfg.epochs + 1):
         model.train()
-        t0 = time.time()
+        t0_epoch = time.time()
+        t0_train = time.time()
         total_loss = 0.0
         total_tokens = 0
 
@@ -336,8 +338,10 @@ def main() -> None:
                 total_loss += float(loss.item()) * max(1, int(non_pad))
 
         train_loss = total_loss / max(1, total_tokens)
+        train_seconds = time.time() - t0_train
 
         model.eval()
+        t0_eval = time.time()
         valid_total_loss = 0.0
         valid_total_tokens = 0
         with torch.no_grad():
@@ -384,6 +388,7 @@ def main() -> None:
                 do_beam=cfg.eval_beam,
                 tgt_key=cfg.tgt_key,
             )
+        eval_seconds = time.time() - t0_eval
 
         valid_metric = beam_bleu if cfg.eval_beam else greedy_bleu
         test_metric = test_beam_bleu if cfg.eval_beam else test_greedy_bleu
@@ -397,7 +402,7 @@ def main() -> None:
                 "test_metric": float(test_metric),
             }
 
-        elapsed = time.time() - t0
+        elapsed = time.time() - t0_epoch
         print(
             json.dumps(
                 {
@@ -411,6 +416,10 @@ def main() -> None:
                     "best_epoch": best_epoch,
                     "best_valid_metric": round(best_valid_metric, 2),
                     "seconds": round(elapsed, 1),
+                    "train_seconds": round(train_seconds, 1),
+                    "eval_seconds": round(eval_seconds, 1),
+                    "train_tokens_per_sec": round(float(total_tokens) / max(1e-9, float(train_seconds)), 1),
+                    "num_params": num_params,
                     "device": str(device),
                     "teacher_forcing_ratio": cfg.teacher_forcing_ratio,
                     "rnn_type": cfg.rnn_type,
