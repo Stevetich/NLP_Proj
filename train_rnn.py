@@ -196,7 +196,7 @@ def main() -> None:
     parser.add_argument("--wandb", action="store_true")
     parser.add_argument("--wandb_project", type=str, default="nmt")
     default_wandb_entity = os.environ.get("WANDB_ENTITY", "")
-    default_wandb_name = f"rnn-{time.strftime('%Y%m%d-%H%M%S')}"
+    default_wandb_name = f"rnn-baseline"
     parser.add_argument("--wandb_entity", type=str, default=default_wandb_entity)
     parser.add_argument("--wandb_name", type=str, default=default_wandb_name)
     parser.add_argument("--wandb_tags", type=str, default="rnn")
