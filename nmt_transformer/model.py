@@ -409,6 +409,7 @@ class TransformerDecoder(nn.Module):
         )
         self.final_norm = make_norm(norm_type, dim, norm_eps)
         self.lm_head = nn.Linear(dim, vocab_size, bias=False)
+        self.lm_head.weight = self.embed.weight
 
     def _causal_mask(self, tgt_len: int, device: torch.device) -> torch.Tensor:
         return torch.triu(torch.ones(tgt_len, tgt_len, device=device, dtype=torch.bool), diagonal=1)[
@@ -525,4 +526,3 @@ class Seq2SeqTransformer(nn.Module):
     ) -> torch.Tensor:
         logits = self.decoder(tgt_prefix_ids, memory=memory, memory_key_padding_mask=memory_key_padding_mask)
         return logits[:, -1, :]
-

@@ -10,6 +10,7 @@ from typing import Dict, List, Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from nmt_rnn.data import (
@@ -53,6 +54,7 @@ class TrainConfig:
     scheduler: str
     warmup_steps: int
     weight_decay: float
+    label_smoothing: float
     grad_clip: float
     epochs: int
     eval_max_len: int
@@ -78,9 +80,22 @@ def save_vocab(path: Path, vocab: Vocab) -> None:
     save_json(path, {"itos": vocab.itos})
 
 
-def compute_loss(logits: torch.Tensor, tgt_ids: torch.Tensor, criterion: nn.Module) -> torch.Tensor:
+def compute_loss(
+    logits: torch.Tensor,
+    tgt_ids: torch.Tensor,
+    pad_id: int,
+    label_smoothing: float,
+) -> torch.Tensor:
     gold = tgt_ids[:, 1:].contiguous()
-    return criterion(logits.reshape(-1, logits.size(-1)), gold.reshape(-1))
+    log_probs = F.log_softmax(logits, dim=-1)
+    nll = -log_probs.gather(dim=-1, index=gold.unsqueeze(-1)).squeeze(-1)
+    smooth = -log_probs.mean(dim=-1)
+    non_pad = gold.ne(pad_id)
+    if label_smoothing > 0:
+        nll = nll.masked_select(non_pad).mean()
+        smooth = smooth.masked_select(non_pad).mean()
+        return (1.0 - label_smoothing) * nll + label_smoothing * smooth
+    return nll.masked_select(non_pad).mean()
 
 
 @torch.no_grad()
@@ -167,6 +182,7 @@ def main() -> None:
     parser.add_argument("--scheduler", type=str, choices=["constant", "noam"], default="noam")
     parser.add_argument("--warmup_steps", type=int, default=2000)
     parser.add_argument("--weight_decay", type=float, default=0.0)
+    parser.add_argument("--label_smoothing", type=float, default=0.1)
     parser.add_argument("--grad_clip", type=float, default=1.0)
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--eval_max_len", type=int, default=120)
@@ -202,6 +218,7 @@ def main() -> None:
         scheduler=args.scheduler,
         warmup_steps=args.warmup_steps,
         weight_decay=args.weight_decay,
+        label_smoothing=args.label_smoothing,
         grad_clip=args.grad_clip,
         epochs=args.epochs,
         eval_max_len=args.eval_max_len,
@@ -291,7 +308,6 @@ def main() -> None:
         max_len=max(cfg.max_src_len, cfg.max_tgt_len, cfg.eval_max_len) + 8,
     ).to(device)
 
-    criterion = nn.CrossEntropyLoss(ignore_index=tgt_vocab.pad_id)
     optim = torch.optim.AdamW(
         model.parameters(),
         lr=cfg.lr if cfg.scheduler == "constant" else 1.0,
@@ -328,7 +344,12 @@ def main() -> None:
                     group["lr"] = lr
             optim.zero_grad(set_to_none=True)
             out = model(src_ids=batch["src_ids"], tgt_ids=batch["tgt_ids"])
-            loss = compute_loss(out.logits, batch["tgt_ids"], criterion)
+            loss = compute_loss(
+                out.logits,
+                batch["tgt_ids"],
+                pad_id=tgt_vocab.pad_id,
+                label_smoothing=float(cfg.label_smoothing),
+            )
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
             optim.step()
@@ -348,7 +369,12 @@ def main() -> None:
             for batch in valid_loader:
                 batch = batch_to_device(batch, device)
                 out = model(src_ids=batch["src_ids"], tgt_ids=batch["tgt_ids"])
-                loss = compute_loss(out.logits, batch["tgt_ids"], criterion)
+                loss = compute_loss(
+                    out.logits,
+                    batch["tgt_ids"],
+                    pad_id=tgt_vocab.pad_id,
+                    label_smoothing=0.0,
+                )
                 gold = batch["tgt_ids"][:, 1:]
                 non_pad = gold.ne(tgt_vocab.pad_id).sum().item()
                 valid_total_tokens += int(non_pad)
