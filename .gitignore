@@ -1,7 +1,6 @@
 # 数据集与大文件
 data/
 tmp/
-checkpoints/
 
 # 常见二进制与压缩
 *.zip
@@ -13,7 +12,6 @@ checkpoints/
 *.mat
 *.xlsx
 
-*.sh
 
 # Python/Notebook 临时文件
 __pycache__/
