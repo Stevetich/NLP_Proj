@@ -58,6 +58,11 @@ class TrainConfig:
     eval_test: bool
     seed: int
     save_dir: str
+    wandb: bool
+    wandb_project: str
+    wandb_entity: str
+    wandb_name: str
+    wandb_tags: str
 
 
 def set_seed(seed: int) -> None:
@@ -188,6 +193,11 @@ def main() -> None:
     parser.add_argument("--eval_test", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--save_dir", type=str, default="checkpoints/rnn")
+    parser.add_argument("--wandb", action="store_true")
+    parser.add_argument("--wandb_project", type=str, default="nmt")
+    parser.add_argument("--wandb_entity", type=str, default="")
+    parser.add_argument("--wandb_name", type=str, default="")
+    parser.add_argument("--wandb_tags", type=str, default="")
     args = parser.parse_args()
 
     cfg = TrainConfig(
@@ -219,6 +229,11 @@ def main() -> None:
         eval_test=bool(args.eval_test),
         seed=args.seed,
         save_dir=args.save_dir,
+        wandb=bool(args.wandb),
+        wandb_project=args.wandb_project,
+        wandb_entity=args.wandb_entity,
+        wandb_name=args.wandb_name,
+        wandb_tags=args.wandb_tags,
     )
 
     set_seed(cfg.seed)
@@ -310,75 +325,76 @@ def main() -> None:
     best_epoch = 0
     best_snapshot: Dict[str, float | int] = {}
 
-    for epoch in range(1, cfg.epochs + 1):
-        model.train()
-        t0_epoch = time.time()
-        t0_train = time.time()
-        total_loss = 0.0
-        total_tokens = 0
+    wandb_run = None
+    if cfg.wandb:
+        try:
+            import wandb  # type: ignore
+        except Exception as e:
+            raise RuntimeError("wandb is not available. Install it to enable --wandb.") from e
+        tags = [t.strip() for t in cfg.wandb_tags.split(",") if t.strip()]
+        wandb_run = wandb.init(
+            project=cfg.wandb_project,
+            entity=cfg.wandb_entity or None,
+            name=cfg.wandb_name or None,
+            tags=tags or None,
+            config=asdict(cfg),
+        )
 
-        for batch in train_loader:
-            batch = batch_to_device(batch, device)
-            optim.zero_grad(set_to_none=True)
-            out = model(
-                src_ids=batch["src_ids"],
-                src_lens=batch["src_lens"],
-                tgt_ids=batch["tgt_ids"],
-                teacher_forcing_ratio=cfg.teacher_forcing_ratio,
-            )
-            loss = compute_loss(out.logits, batch["tgt_ids"], tgt_vocab.pad_id, criterion)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
-            optim.step()
+    try:
+        for epoch in range(1, cfg.epochs + 1):
+            model.train()
+            t0_epoch = time.time()
+            t0_train = time.time()
+            total_loss = 0.0
+            total_tokens = 0
 
-            with torch.no_grad():
-                gold = batch["tgt_ids"][:, 1:]
-                non_pad = gold.ne(tgt_vocab.pad_id).sum().item()
-                total_tokens += int(non_pad)
-                total_loss += float(loss.item()) * max(1, int(non_pad))
-
-        train_loss = total_loss / max(1, total_tokens)
-        train_seconds = time.time() - t0_train
-
-        model.eval()
-        t0_eval = time.time()
-        valid_total_loss = 0.0
-        valid_total_tokens = 0
-        with torch.no_grad():
-            for batch in valid_loader:
+            for batch in train_loader:
                 batch = batch_to_device(batch, device)
+                optim.zero_grad(set_to_none=True)
                 out = model(
                     src_ids=batch["src_ids"],
                     src_lens=batch["src_lens"],
                     tgt_ids=batch["tgt_ids"],
-                    teacher_forcing_ratio=1.0,
+                    teacher_forcing_ratio=cfg.teacher_forcing_ratio,
                 )
                 loss = compute_loss(out.logits, batch["tgt_ids"], tgt_vocab.pad_id, criterion)
-                gold = batch["tgt_ids"][:, 1:]
-                non_pad = gold.ne(tgt_vocab.pad_id).sum().item()
-                valid_total_tokens += int(non_pad)
-                valid_total_loss += float(loss.item()) * max(1, int(non_pad))
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
+                optim.step()
 
-        valid_loss = valid_total_loss / max(1, valid_total_tokens)
+                with torch.no_grad():
+                    gold = batch["tgt_ids"][:, 1:]
+                    non_pad = gold.ne(tgt_vocab.pad_id).sum().item()
+                    total_tokens += int(non_pad)
+                    total_loss += float(loss.item()) * max(1, int(non_pad))
 
-        greedy_bleu, beam_bleu = evaluate_bleu(
-            model=model,
-            loader=valid_loader,
-            src_vocab=src_vocab,
-            tgt_vocab=tgt_vocab,
-            device=device,
-            max_len=cfg.eval_max_len,
-            max_samples=cfg.eval_samples,
-            beam_size=cfg.beam_size,
-            do_beam=cfg.eval_beam,
-            tgt_key=cfg.tgt_key,
-        )
-        test_greedy_bleu = 0.0
-        test_beam_bleu = 0.0
-        if test_loader is not None:
-            test_greedy_bleu, test_beam_bleu = evaluate_bleu(
+            train_loss = total_loss / max(1, total_tokens)
+            train_seconds = time.time() - t0_train
+
+            model.eval()
+            t0_eval = time.time()
+            valid_total_loss = 0.0
+            valid_total_tokens = 0
+            with torch.no_grad():
+                for batch in valid_loader:
+                    batch = batch_to_device(batch, device)
+                    out = model(
+                        src_ids=batch["src_ids"],
+                        src_lens=batch["src_lens"],
+                        tgt_ids=batch["tgt_ids"],
+                        teacher_forcing_ratio=1.0,
+                    )
+                    loss = compute_loss(out.logits, batch["tgt_ids"], tgt_vocab.pad_id, criterion)
+                    gold = batch["tgt_ids"][:, 1:]
+                    non_pad = gold.ne(tgt_vocab.pad_id).sum().item()
+                    valid_total_tokens += int(non_pad)
+                    valid_total_loss += float(loss.item()) * max(1, int(non_pad))
+
+            valid_loss = valid_total_loss / max(1, valid_total_tokens)
+
+            greedy_bleu, beam_bleu = evaluate_bleu(
                 model=model,
-                loader=test_loader,
+                loader=valid_loader,
                 src_vocab=src_vocab,
                 tgt_vocab=tgt_vocab,
                 device=device,
@@ -388,57 +404,89 @@ def main() -> None:
                 do_beam=cfg.eval_beam,
                 tgt_key=cfg.tgt_key,
             )
-        eval_seconds = time.time() - t0_eval
+            test_greedy_bleu = 0.0
+            test_beam_bleu = 0.0
+            if test_loader is not None:
+                test_greedy_bleu, test_beam_bleu = evaluate_bleu(
+                    model=model,
+                    loader=test_loader,
+                    src_vocab=src_vocab,
+                    tgt_vocab=tgt_vocab,
+                    device=device,
+                    max_len=cfg.eval_max_len,
+                    max_samples=cfg.eval_samples,
+                    beam_size=cfg.beam_size,
+                    do_beam=cfg.eval_beam,
+                    tgt_key=cfg.tgt_key,
+                )
+            eval_seconds = time.time() - t0_eval
 
-        valid_metric = beam_bleu if cfg.eval_beam else greedy_bleu
-        test_metric = test_beam_bleu if cfg.eval_beam else test_greedy_bleu
-        is_best = valid_metric > best_valid_metric
-        if is_best:
-            best_valid_metric = valid_metric
-            best_epoch = epoch
-            best_snapshot = {
-                "epoch": epoch,
-                "valid_metric": float(valid_metric),
-                "test_metric": float(test_metric),
-            }
-
-        elapsed = time.time() - t0_epoch
-        print(
-            json.dumps(
-                {
+            valid_metric = beam_bleu if cfg.eval_beam else greedy_bleu
+            test_metric = test_beam_bleu if cfg.eval_beam else test_greedy_bleu
+            is_best = valid_metric > best_valid_metric
+            if is_best:
+                best_valid_metric = valid_metric
+                best_epoch = epoch
+                best_snapshot = {
                     "epoch": epoch,
-                    "train_loss": round(train_loss, 4),
-                    "valid_loss": round(valid_loss, 4),
-                    "valid_greedy_bleu": round(greedy_bleu, 2),
-                    "valid_beam_bleu": round(beam_bleu, 2),
-                    "test_greedy_bleu": round(test_greedy_bleu, 2) if cfg.eval_test else None,
-                    "test_beam_bleu": round(test_beam_bleu, 2) if cfg.eval_test else None,
-                    "best_epoch": best_epoch,
-                    "best_valid_metric": round(best_valid_metric, 2),
-                    "seconds": round(elapsed, 1),
-                    "train_seconds": round(train_seconds, 1),
-                    "eval_seconds": round(eval_seconds, 1),
-                    "train_tokens_per_sec": round(float(total_tokens) / max(1e-9, float(train_seconds)), 1),
-                    "num_params": num_params,
-                    "device": str(device),
-                    "teacher_forcing_ratio": cfg.teacher_forcing_ratio,
-                    "rnn_type": cfg.rnn_type,
-                    "attention_type": cfg.attention_type,
-                },
-                ensure_ascii=False,
-            )
-        )
+                    "valid_metric": float(valid_metric),
+                    "test_metric": float(test_metric),
+                }
 
-        ckpt = {
-            "model": model.state_dict(),
-            "config": asdict(cfg),
-            "src_vocab": {"itos": src_vocab.itos},
-            "tgt_vocab": {"itos": tgt_vocab.itos},
-        }
-        torch.save(ckpt, save_dir / "last.pt")
-        if is_best:
-            torch.save(ckpt, save_dir / "best.pt")
-            save_json(save_dir / "best.json", {"best": best_snapshot})
+            elapsed = time.time() - t0_epoch
+            payload = {
+                "epoch": epoch,
+                "train_loss": round(train_loss, 4),
+                "valid_loss": round(valid_loss, 4),
+                "valid_greedy_bleu": round(greedy_bleu, 2),
+                "valid_beam_bleu": round(beam_bleu, 2),
+                "test_greedy_bleu": round(test_greedy_bleu, 2) if cfg.eval_test else None,
+                "test_beam_bleu": round(test_beam_bleu, 2) if cfg.eval_test else None,
+                "best_epoch": best_epoch,
+                "best_valid_metric": round(best_valid_metric, 2),
+                "seconds": round(elapsed, 1),
+                "train_seconds": round(train_seconds, 1),
+                "eval_seconds": round(eval_seconds, 1),
+                "train_tokens_per_sec": round(float(total_tokens) / max(1e-9, float(train_seconds)), 1),
+                "num_params": num_params,
+                "device": str(device),
+                "teacher_forcing_ratio": cfg.teacher_forcing_ratio,
+                "rnn_type": cfg.rnn_type,
+                "attention_type": cfg.attention_type,
+            }
+            print(json.dumps(payload, ensure_ascii=False))
+            if wandb_run is not None:
+                wandb_run.log(
+                    {
+                        "train/loss": float(train_loss),
+                        "valid/loss": float(valid_loss),
+                        "valid/bleu_greedy": float(greedy_bleu),
+                        "valid/bleu_beam": float(beam_bleu),
+                        "test/bleu_greedy": float(test_greedy_bleu) if cfg.eval_test else None,
+                        "test/bleu_beam": float(test_beam_bleu) if cfg.eval_test else None,
+                        "best/epoch": int(best_epoch),
+                        "best/valid_metric": float(best_valid_metric),
+                        "perf/train_tokens_per_sec": float(payload["train_tokens_per_sec"]),
+                        "perf/train_seconds": float(train_seconds),
+                        "perf/eval_seconds": float(eval_seconds),
+                        "meta/num_params": float(num_params),
+                    },
+                    step=epoch,
+                )
+
+            ckpt = {
+                "model": model.state_dict(),
+                "config": asdict(cfg),
+                "src_vocab": {"itos": src_vocab.itos},
+                "tgt_vocab": {"itos": tgt_vocab.itos},
+            }
+            torch.save(ckpt, save_dir / "last.pt")
+            if is_best:
+                torch.save(ckpt, save_dir / "best.pt")
+                save_json(save_dir / "best.json", {"best": best_snapshot})
+    finally:
+        if wandb_run is not None:
+            wandb_run.finish()
 
 
 if __name__ == "__main__":

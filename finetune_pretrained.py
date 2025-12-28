@@ -65,6 +65,11 @@ class TrainConfig:
     fp16: bool
     seed: int
     save_dir: str
+    wandb: bool
+    wandb_project: str
+    wandb_entity: str
+    wandb_name: str
+    wandb_tags: str
 
 
 def set_seed(seed: int) -> None:
@@ -224,6 +229,11 @@ def main() -> None:
     parser.add_argument("--fp16", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--save_dir", type=str, default="checkpoints/finetune")
+    parser.add_argument("--wandb", action="store_true")
+    parser.add_argument("--wandb_project", type=str, default="nmt")
+    parser.add_argument("--wandb_entity", type=str, default="")
+    parser.add_argument("--wandb_name", type=str, default="")
+    parser.add_argument("--wandb_tags", type=str, default="")
     args = parser.parse_args()
 
     cfg = TrainConfig(
@@ -252,6 +262,11 @@ def main() -> None:
         fp16=bool(args.fp16),
         seed=args.seed,
         save_dir=args.save_dir,
+        wandb=bool(args.wandb),
+        wandb_project=args.wandb_project,
+        wandb_entity=args.wandb_entity,
+        wandb_name=args.wandb_name,
+        wandb_tags=args.wandb_tags,
     )
 
     set_seed(cfg.seed)
@@ -295,81 +310,111 @@ def main() -> None:
     best_epoch = 0
     best_snapshot: Dict[str, float | int] = {}
 
-    for epoch in range(1, cfg.epochs + 1):
-        model.train()
-        t0 = time.time()
-        total_loss = 0.0
-        steps = 0
-
-        for batch in train_loader:
-            if cfg.max_train_steps > 0 and steps >= cfg.max_train_steps:
-                break
-            batch = batch_to_device(batch, device)
-            optim.zero_grad(set_to_none=True)
-            with torch.cuda.amp.autocast(enabled=bool(cfg.fp16 and device.type == "cuda")):
-                outputs = model(
-                    input_ids=batch["input_ids"],
-                    attention_mask=batch["attention_mask"],
-                    labels=batch["labels"],
-                )
-                loss = outputs.loss
-            scaler.scale(loss).backward()
-            scaler.unscale_(optim)
-            clip_grad_norm(model.parameters(), cfg.grad_clip)
-            scaler.step(optim)
-            scaler.update()
-
-            total_loss += float(loss.item())
-            steps += 1
-
-        train_loss = total_loss / max(1, steps)
-        valid_loss, valid_bleu = evaluate(model, tokenizer, valid_loader, device, cfg)
-        test_loss = 0.0
-        test_bleu = 0.0
-        if test_loader is not None:
-            test_loss, test_bleu = evaluate(model, tokenizer, test_loader, device, cfg)
-
-        is_best = valid_bleu > best_valid_bleu
-        if is_best:
-            best_valid_bleu = valid_bleu
-            best_epoch = epoch
-            best_snapshot = {
-                "epoch": epoch,
-                "valid_bleu": float(valid_bleu),
-                "test_bleu": float(test_bleu),
-            }
-
-        elapsed = time.time() - t0
-        print(
-            json.dumps(
-                {
-                    "epoch": epoch,
-                    "train_loss": round(train_loss, 4),
-                    "valid_loss": round(valid_loss, 4),
-                    "valid_bleu": round(valid_bleu, 2),
-                    "test_loss": round(test_loss, 4) if cfg.eval_test else None,
-                    "test_bleu": round(test_bleu, 2) if cfg.eval_test else None,
-                    "best_epoch": best_epoch,
-                    "best_valid_bleu": round(best_valid_bleu, 2),
-                    "seconds": round(elapsed, 1),
-                    "device": str(device),
-                    "model": cfg.model_name_or_path,
-                    "eval_beam": cfg.eval_beam,
-                    "beam_size": cfg.beam_size,
-                },
-                ensure_ascii=False,
-            )
+    wandb_run = None
+    if cfg.wandb:
+        try:
+            import wandb  # type: ignore
+        except Exception as e:
+            raise RuntimeError("wandb is not available. Install it to enable --wandb.") from e
+        tags = [t.strip() for t in cfg.wandb_tags.split(",") if t.strip()]
+        wandb_run = wandb.init(
+            project=cfg.wandb_project,
+            entity=cfg.wandb_entity or None,
+            name=cfg.wandb_name or None,
+            tags=tags or None,
+            config=asdict(cfg),
         )
 
-        ckpt = {
-            "model": model.state_dict(),
-            "config": asdict(cfg),
-            "tokenizer_name_or_path": cfg.model_name_or_path,
-        }
-        torch.save(ckpt, save_dir / "last.pt")
-        if is_best:
-            torch.save(ckpt, save_dir / "best.pt")
-            save_json(save_dir / "best.json", {"best": best_snapshot})
+    try:
+        for epoch in range(1, cfg.epochs + 1):
+            model.train()
+            t0 = time.time()
+            total_loss = 0.0
+            steps = 0
+
+            for batch in train_loader:
+                if cfg.max_train_steps > 0 and steps >= cfg.max_train_steps:
+                    break
+                batch = batch_to_device(batch, device)
+                optim.zero_grad(set_to_none=True)
+                with torch.cuda.amp.autocast(enabled=bool(cfg.fp16 and device.type == "cuda")):
+                    outputs = model(
+                        input_ids=batch["input_ids"],
+                        attention_mask=batch["attention_mask"],
+                        labels=batch["labels"],
+                    )
+                    loss = outputs.loss
+                scaler.scale(loss).backward()
+                scaler.unscale_(optim)
+                clip_grad_norm(model.parameters(), cfg.grad_clip)
+                scaler.step(optim)
+                scaler.update()
+
+                total_loss += float(loss.item())
+                steps += 1
+
+            train_loss = total_loss / max(1, steps)
+            valid_loss, valid_bleu = evaluate(model, tokenizer, valid_loader, device, cfg)
+            test_loss = 0.0
+            test_bleu = 0.0
+            if test_loader is not None:
+                test_loss, test_bleu = evaluate(model, tokenizer, test_loader, device, cfg)
+
+            is_best = valid_bleu > best_valid_bleu
+            if is_best:
+                best_valid_bleu = valid_bleu
+                best_epoch = epoch
+                best_snapshot = {
+                    "epoch": epoch,
+                    "valid_bleu": float(valid_bleu),
+                    "test_bleu": float(test_bleu),
+                }
+
+            elapsed = time.time() - t0
+            payload = {
+                "epoch": epoch,
+                "train_loss": round(train_loss, 4),
+                "valid_loss": round(valid_loss, 4),
+                "valid_bleu": round(valid_bleu, 2),
+                "test_loss": round(test_loss, 4) if cfg.eval_test else None,
+                "test_bleu": round(test_bleu, 2) if cfg.eval_test else None,
+                "best_epoch": best_epoch,
+                "best_valid_bleu": round(best_valid_bleu, 2),
+                "seconds": round(elapsed, 1),
+                "device": str(device),
+                "model": cfg.model_name_or_path,
+                "eval_beam": cfg.eval_beam,
+                "beam_size": cfg.beam_size,
+            }
+            print(json.dumps(payload, ensure_ascii=False))
+
+            if wandb_run is not None:
+                wandb_run.log(
+                    {
+                        "train/loss": float(train_loss),
+                        "valid/loss": float(valid_loss),
+                        "valid/bleu": float(valid_bleu),
+                        "test/loss": float(test_loss) if cfg.eval_test else None,
+                        "test/bleu": float(test_bleu) if cfg.eval_test else None,
+                        "best/epoch": int(best_epoch),
+                        "best/valid_bleu": float(best_valid_bleu),
+                        "optim/lr": float(cfg.lr),
+                    },
+                    step=epoch,
+                )
+
+            ckpt = {
+                "model": model.state_dict(),
+                "config": asdict(cfg),
+                "tokenizer_name_or_path": cfg.model_name_or_path,
+            }
+            torch.save(ckpt, save_dir / "last.pt")
+            if is_best:
+                torch.save(ckpt, save_dir / "best.pt")
+                save_json(save_dir / "best.json", {"best": best_snapshot})
+    finally:
+        if wandb_run is not None:
+            wandb_run.finish()
 
 
 if __name__ == "__main__":
