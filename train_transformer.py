@@ -21,7 +21,7 @@ from nmt_rnn.data import (
     tokenize_en,
     tokenize_zh,
 )
-from nmt_rnn.metrics import corpus_bleu
+from nmt_rnn.metrics import sacrebleu_bleu
 from nmt_transformer.decoding import beam_search_decode, greedy_decode
 from nmt_transformer.model import NormType, PosEncodingType, Seq2SeqTransformer
 
@@ -90,9 +90,9 @@ def evaluate_bleu(
     do_beam: bool,
 ) -> Tuple[float, float]:
     model.eval()
-    greedy_hyps: List[List[str]] = []
-    beam_hyps: List[List[str]] = []
-    refs: List[List[str]] = []
+    greedy_hyps: List[str] = []
+    beam_hyps: List[str] = []
+    refs: List[str] = []
 
     seen = 0
     for batch in loader:
@@ -114,8 +114,8 @@ def evaluate_bleu(
                 break
             hyp_tokens = tgt_vocab.decode(hyp_ids[1:], stop_at_eos=True)
             ref_tokens = tgt_vocab.decode(ref_ids[1:], stop_at_eos=True)
-            greedy_hyps.append(hyp_tokens)
-            refs.append(ref_tokens)
+            greedy_hyps.append(" ".join(hyp_tokens))
+            refs.append(" ".join(ref_tokens))
             if do_beam:
                 one_src = src_ids[i : i + 1]
                 beam = beam_search_decode(
@@ -127,11 +127,11 @@ def evaluate_bleu(
                     max_len=max_len,
                 )[0]
                 beam_tokens = tgt_vocab.decode(beam.token_ids[1:], stop_at_eos=True)
-                beam_hyps.append(beam_tokens)
+                beam_hyps.append(" ".join(beam_tokens))
             seen += 1
 
-    greedy_bleu = corpus_bleu(references=refs, hypotheses=greedy_hyps)
-    beam_bleu = corpus_bleu(references=refs, hypotheses=beam_hyps) if do_beam else 0.0
+    greedy_bleu = sacrebleu_bleu(references=refs, hypotheses=greedy_hyps)
+    beam_bleu = sacrebleu_bleu(references=refs, hypotheses=beam_hyps) if do_beam else 0.0
     return greedy_bleu, beam_bleu
 
 
@@ -372,12 +372,12 @@ def main() -> None:
                     "epoch": epoch,
                     "train_loss": round(train_loss, 4),
                     "valid_loss": round(valid_loss, 4),
-                    "valid_greedy_bleu": round(greedy_bleu, 6),
-                    "valid_beam_bleu": round(beam_bleu, 6),
-                    "test_greedy_bleu": round(test_greedy_bleu, 6) if cfg.eval_test else None,
-                    "test_beam_bleu": round(test_beam_bleu, 6) if cfg.eval_test else None,
+                    "valid_greedy_bleu": round(greedy_bleu, 2),
+                    "valid_beam_bleu": round(beam_bleu, 2),
+                    "test_greedy_bleu": round(test_greedy_bleu, 2) if cfg.eval_test else None,
+                    "test_beam_bleu": round(test_beam_bleu, 2) if cfg.eval_test else None,
                     "best_epoch": best_epoch,
-                    "best_valid_metric": round(best_valid_metric, 6),
+                    "best_valid_metric": round(best_valid_metric, 2),
                     "seconds": round(elapsed, 1),
                     "device": str(device),
                     "norm_type": cfg.norm_type,

@@ -13,8 +13,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 
-from nmt_rnn.metrics import corpus_bleu
-from nmt_rnn.data import tokenize_en
+from nmt_rnn.metrics import sacrebleu_bleu
 
 
 class JsonlSeq2SeqTextDataset(Dataset):
@@ -158,8 +157,8 @@ def evaluate(
     model.eval()
     total_loss = 0.0
     total_batches = 0
-    refs: List[List[str]] = []
-    hyps: List[List[str]] = []
+    refs: List[str] = []
+    hyps: List[str] = []
 
     seen = 0
     batches = 0
@@ -189,11 +188,11 @@ def evaluate(
         for hyp, ref in zip(gen_texts, batch["tgt_texts"]):
             if cfg.eval_samples > 0 and seen >= cfg.eval_samples:
                 break
-            hyps.append(tokenize_en(hyp, lowercase=True))
-            refs.append(tokenize_en(ref, lowercase=True))
+            hyps.append(str(hyp).strip())
+            refs.append(str(ref).strip())
             seen += 1
 
-    bleu = corpus_bleu(references=refs, hypotheses=hyps) if refs else 0.0
+    bleu = sacrebleu_bleu(references=refs, hypotheses=hyps) if refs else 0.0
     loss = total_loss / max(1, total_batches)
     return loss, bleu
 
@@ -347,11 +346,11 @@ def main() -> None:
                     "epoch": epoch,
                     "train_loss": round(train_loss, 4),
                     "valid_loss": round(valid_loss, 4),
-                    "valid_bleu": round(valid_bleu, 6),
+                    "valid_bleu": round(valid_bleu, 2),
                     "test_loss": round(test_loss, 4) if cfg.eval_test else None,
-                    "test_bleu": round(test_bleu, 6) if cfg.eval_test else None,
+                    "test_bleu": round(test_bleu, 2) if cfg.eval_test else None,
                     "best_epoch": best_epoch,
-                    "best_valid_bleu": round(best_valid_bleu, 6),
+                    "best_valid_bleu": round(best_valid_bleu, 2),
                     "seconds": round(elapsed, 1),
                     "device": str(device),
                     "model": cfg.model_name_or_path,

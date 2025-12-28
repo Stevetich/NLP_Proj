@@ -14,6 +14,7 @@ def corpus_bleu(
     references: Iterable[Sequence[str]],
     hypotheses: Iterable[Sequence[str]],
     max_n: int = 4,
+    smooth: float = 1.0,
 ) -> float:
     refs = list(references)
     hyps = list(hypotheses)
@@ -40,16 +41,46 @@ def corpus_bleu(
     if ref_len_total <= 0:
         return 0.0
 
-    bp = min(1.0, hyp_len_total / ref_len_total) if hyp_len_total > 0 else 0.0
+    if hyp_len_total <= 0:
+        return 0.0
 
-    prod_p = 1.0
+    import math
+
+    precisions = []
     for n in range(max_n):
-        if total_counts[n] <= 0:
-            return 0.0
-        p_n = clipped_counts[n] / total_counts[n]
-        if p_n <= 0.0:
-            return 0.0
-        prod_p *= p_n
+        p_n = (clipped_counts[n] + smooth) / (total_counts[n] + smooth)
+        precisions.append(p_n)
 
-    bleu = bp * prod_p
-    return 100.0 * bleu
+    log_p = sum(math.log(p) for p in precisions) / max_n
+
+    bp = 1.0
+    if hyp_len_total < ref_len_total:
+        bp = math.exp(1.0 - (ref_len_total / hyp_len_total))
+
+    return 100.0 * bp * math.exp(log_p)
+
+
+def sacrebleu_bleu(
+    references: Iterable[str],
+    hypotheses: Iterable[str],
+    tokenize: str = "intl",
+    lowercase: bool = False,
+) -> float:
+    refs = list(references)
+    hyps = list(hypotheses)
+    if len(refs) != len(hyps):
+        raise ValueError("references and hypotheses must have same length")
+    if not refs:
+        return 0.0
+    try:
+        import sacrebleu
+    except Exception as e:
+        raise RuntimeError("sacrebleu is not available. Install it to compute BLEU.") from e
+
+    bleu = sacrebleu.corpus_bleu(
+        hyps,
+        [refs],
+        tokenize=tokenize,
+        lowercase=lowercase,
+    )
+    return float(bleu.score)

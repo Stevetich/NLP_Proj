@@ -24,7 +24,11 @@ def tokenize_zh(text: str) -> List[str]:
     text = text.strip()
     if not text:
         return []
-    return [ch for ch in text if not ch.isspace()]
+    try:
+        import jieba
+    except Exception as e:
+        raise RuntimeError("jieba is not available. Install it to tokenize Chinese.") from e
+    return [tok for tok in jieba.lcut(text, cut_all=False) if tok and not tok.isspace()]
 
 
 _EN_PATTERN = re.compile(r"[A-Za-z]+|[0-9]+|[^\sA-Za-z0-9]")
@@ -203,4 +207,3 @@ def estimate_num_batches(num_examples: int, batch_size: int) -> int:
     if batch_size <= 0:
         return 0
     return int(math.ceil(num_examples / batch_size))
-
