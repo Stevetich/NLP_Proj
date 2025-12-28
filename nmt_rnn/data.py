@@ -41,6 +41,30 @@ def tokenize_en(text: str, lowercase: bool = True) -> List[str]:
     return _EN_PATTERN.findall(text)
 
 
+_EN_DETOK_NO_SPACE_BEFORE = re.compile(r"\s+([,.;:!?%\]\)\}])")
+_EN_DETOK_NO_SPACE_AFTER = re.compile(r"([\[\(\{])\s+")
+
+
+def detokenize_zh(tokens: Sequence[str]) -> str:
+    return "".join(tokens)
+
+
+def detokenize_en(tokens: Sequence[str]) -> str:
+    s = " ".join(tokens).strip()
+    if not s:
+        return s
+    s = _EN_DETOK_NO_SPACE_BEFORE.sub(r"\1", s)
+    s = _EN_DETOK_NO_SPACE_AFTER.sub(r"\1", s)
+    s = s.replace(" n't", "n't")
+    s = s.replace(" 're", "'re")
+    s = s.replace(" 've", "'ve")
+    s = s.replace(" 'll", "'ll")
+    s = s.replace(" 'd", "'d")
+    s = s.replace(" 'm", "'m")
+    s = s.replace(" 's", "'s")
+    return s
+
+
 @dataclass(frozen=True)
 class Vocab:
     stoi: Dict[str, int]

@@ -65,6 +65,7 @@ def sacrebleu_bleu(
     hypotheses: Iterable[str],
     tokenize: str = "intl",
     lowercase: bool = False,
+    force: bool = True,
 ) -> float:
     refs = list(references)
     hyps = list(hypotheses)
@@ -82,5 +83,6 @@ def sacrebleu_bleu(
         [refs],
         tokenize=tokenize,
         lowercase=lowercase,
+        force=force,
     )
     return float(bleu.score)

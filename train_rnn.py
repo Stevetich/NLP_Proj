@@ -17,6 +17,8 @@ from nmt_rnn.data import (
     Vocab,
     batch_to_device,
     build_vocab,
+    detokenize_en,
+    detokenize_zh,
     make_collate_fn,
     tokenize_en,
     tokenize_zh,
@@ -106,6 +108,7 @@ def evaluate_bleu(
     max_samples: int,
     beam_size: int,
     do_beam: bool,
+    tgt_key: str,
 ) -> Tuple[float, float]:
     model.eval()
     greedy_hyps: List[str] = []
@@ -131,8 +134,9 @@ def evaluate_bleu(
                 break
             hyp_tokens = tgt_vocab.decode(hyp_ids[1:], stop_at_eos=True)
             ref_tokens = tgt_vocab.decode(ref_ids[1:], stop_at_eos=True)
-            greedy_hyps.append(" ".join(hyp_tokens))
-            refs.append(" ".join(ref_tokens))
+            detok = detokenize_en if tgt_key == "en" else detokenize_zh
+            greedy_hyps.append(detok(hyp_tokens))
+            refs.append(detok(ref_tokens))
             if do_beam:
                 one_src = src_ids[i : i + 1]
                 one_len = src_lens[i : i + 1]
@@ -146,7 +150,7 @@ def evaluate_bleu(
                     max_len=max_len,
                 )[0]
                 beam_tokens = tgt_vocab.decode(beam.token_ids[1:], stop_at_eos=True)
-                beam_hyps.append(" ".join(beam_tokens))
+                beam_hyps.append(detok(beam_tokens))
             seen += 1
 
     greedy_bleu = sacrebleu_bleu(references=refs, hypotheses=greedy_hyps)
@@ -363,6 +367,7 @@ def main() -> None:
             max_samples=cfg.eval_samples,
             beam_size=cfg.beam_size,
             do_beam=cfg.eval_beam,
+            tgt_key=cfg.tgt_key,
         )
         test_greedy_bleu = 0.0
         test_beam_bleu = 0.0
@@ -377,6 +382,7 @@ def main() -> None:
                 max_samples=cfg.eval_samples,
                 beam_size=cfg.beam_size,
                 do_beam=cfg.eval_beam,
+                tgt_key=cfg.tgt_key,
             )
 
         valid_metric = beam_bleu if cfg.eval_beam else greedy_bleu
