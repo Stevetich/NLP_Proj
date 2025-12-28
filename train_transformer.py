@@ -50,6 +50,9 @@ class TrainConfig:
     max_vocab: int
     min_freq: int
     lr: float
+    scheduler: str
+    warmup_steps: int
+    weight_decay: float
     grad_clip: float
     epochs: int
     eval_max_len: int
@@ -160,7 +163,10 @@ def main() -> None:
     parser.add_argument("--max_tgt_len", type=int, default=200)
     parser.add_argument("--max_vocab", type=int, default=50000)
     parser.add_argument("--min_freq", type=int, default=2)
-    parser.add_argument("--lr", type=float, default=5e-4)
+    parser.add_argument("--lr", type=float, default=1.0)
+    parser.add_argument("--scheduler", type=str, choices=["constant", "noam"], default="noam")
+    parser.add_argument("--warmup_steps", type=int, default=2000)
+    parser.add_argument("--weight_decay", type=float, default=0.0)
     parser.add_argument("--grad_clip", type=float, default=1.0)
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--eval_max_len", type=int, default=120)
@@ -193,6 +199,9 @@ def main() -> None:
         max_vocab=args.max_vocab,
         min_freq=args.min_freq,
         lr=args.lr,
+        scheduler=args.scheduler,
+        warmup_steps=args.warmup_steps,
+        weight_decay=args.weight_decay,
         grad_clip=args.grad_clip,
         epochs=args.epochs,
         eval_max_len=args.eval_max_len,
@@ -283,7 +292,13 @@ def main() -> None:
     ).to(device)
 
     criterion = nn.CrossEntropyLoss(ignore_index=tgt_vocab.pad_id)
-    optim = torch.optim.AdamW(model.parameters(), lr=cfg.lr)
+    optim = torch.optim.AdamW(
+        model.parameters(),
+        lr=cfg.lr if cfg.scheduler == "constant" else 1.0,
+        betas=(0.9, 0.98),
+        eps=1e-9,
+        weight_decay=cfg.weight_decay,
+    )
 
     save_dir = Path(cfg.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -294,6 +309,7 @@ def main() -> None:
     best_valid_metric = float("-inf")
     best_epoch = 0
     best_snapshot: Dict[str, float | int] = {}
+    global_step = 0
 
     for epoch in range(1, cfg.epochs + 1):
         model.train()
@@ -303,6 +319,13 @@ def main() -> None:
 
         for batch in train_loader:
             batch = batch_to_device(batch, device)
+            global_step += 1
+            if cfg.scheduler == "noam":
+                step = float(global_step)
+                warmup = float(max(1, cfg.warmup_steps))
+                lr = (float(cfg.lr) * (cfg.dim**-0.5)) * min(step**-0.5, step * (warmup**-1.5))
+                for group in optim.param_groups:
+                    group["lr"] = lr
             optim.zero_grad(set_to_none=True)
             out = model(src_ids=batch["src_ids"], tgt_ids=batch["tgt_ids"])
             loss = compute_loss(out.logits, batch["tgt_ids"], criterion)
